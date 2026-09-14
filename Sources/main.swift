@@ -1,6 +1,7 @@
 import Cocoa
 import WebKit
 import Carbon
+import ServiceManagement
 
 class HandlePanel: NSPanel {
     init(contentRect: NSRect) {
@@ -22,15 +23,98 @@ class HandlePanel: NSPanel {
 
 class HandleView: NSView {
     var onClick: (() -> Void)?
-    override func mouseDown(with event: NSEvent) { onClick?() }
+    var onDragOpen: (() -> Void)?
+    var onHoverOpen: (() -> Void)?
+    private var isHovered: Bool = false
+    private var dragStartX: CGFloat = 0
+    private var hoverTimer: Timer?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        let trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        needsDisplay = true
+        hoverTimer?.invalidate()
+        hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            guard let self = self, self.isHovered else { return }
+            self.onHoverOpen?()
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        needsDisplay = true
+        hoverTimer?.invalidate()
+        hoverTimer = nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        hoverTimer?.invalidate()
+        hoverTimer = nil
+        dragStartX = NSEvent.mouseLocation.x
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let currentX = NSEvent.mouseLocation.x
+        if dragStartX - currentX > 18 {
+            dragStartX = currentX
+            onDragOpen?()
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let currentX = NSEvent.mouseLocation.x
+        if abs(dragStartX - currentX) < 6 {
+            onClick?()
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let handleHeight: CGFloat = 80
-        let handleY = (bounds.height - handleHeight) / 2 + 50
-        let pillRect = NSRect(x: bounds.maxX - 6, y: handleY, width: 5, height: handleHeight)
-        let path = NSBezierPath(roundedRect: pillRect, xRadius: 2.5, yRadius: 2.5)
-        NSColor.systemGray.withAlphaComponent(0.45).setFill()
+        let handleHeight: CGFloat = isHovered ? 96 : 80
+        let handleWidth: CGFloat = isHovered ? 7 : 4
+        let handleY = (bounds.height - handleHeight) / 2
+        let pillRect = NSRect(x: bounds.maxX - handleWidth - 2, y: handleY, width: handleWidth, height: handleHeight)
+        let path = NSBezierPath(roundedRect: pillRect, xRadius: handleWidth / 2, yRadius: handleWidth / 2)
+        let alpha: CGFloat = isHovered ? 0.75 : 0.4
+        NSColor.systemGray.withAlphaComponent(alpha).setFill()
         path.fill()
+    }
+}
+
+class ResizeHandleView: NSView {
+    var onResize: ((CGFloat) -> Void)?
+    var onResizeEnded: (() -> Void)?
+    private var initialMouseX: CGFloat = 0
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        initialMouseX = NSEvent.mouseLocation.x
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let currentMouseX = NSEvent.mouseLocation.x
+        let deltaX = initialMouseX - currentMouseX
+        initialMouseX = currentMouseX
+        onResize?(deltaX)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        onResizeEnded?()
     }
 }
 
@@ -56,6 +140,8 @@ class WeReadWebView: WKWebView {
 }
 
 class WeReadPanel: NSPanel {
+    var onEscapePressed: (() -> Void)?
+    var onResignKey: (() -> Void)?
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
@@ -73,19 +159,33 @@ class WeReadPanel: NSPanel {
         self.hasShadow = true
     }
     override var canBecomeKey: Bool { return true }
+
+    override func cancelOperation(_ sender: Any?) {
+        onEscapePressed?()
+    }
+
+    override func resignKey() {
+        super.resignKey()
+        onResignKey?()
+    }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var panel: WeReadPanel!
     var handlePanel: HandlePanel!
     var handleView: HandleView!
     var webView: WeReadWebView!
+    var resizeHandle: ResizeHandleView!
     var drawerWidth: CGFloat = 520
+    var isAnimating: Bool = false
     var globalHotKeyRef: EventHotKeyRef?
+    var hotKeyEventHandler: EventHandlerRef?
     var isPinned: Bool = false
-    private var mouseCheckTimer: Timer?
-    private var outsideHoverCount: Int = 0
+    private var totalSeconds: TimeInterval = 0
+    private var openCount: Int = 0
+    private var currentSessionStartTime: Date?
+    private var statsMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         loadSavedSettings()
@@ -95,6 +195,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         setupWebView()
         setupGlobalHotKey()
         setupAutoHiding()
+        setupScreenObserver()
         loadWeRead()
         showDrawer()
     }
@@ -102,23 +203,65 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     func loadSavedSettings() {
         let saved = UserDefaults.standard.double(forKey: "WeReadDrawerWidth")
         if saved >= 380 && saved <= 1400 { drawerWidth = CGFloat(saved) }
+        totalSeconds = UserDefaults.standard.double(forKey: "WeReadTotalReadSeconds")
+        openCount = UserDefaults.standard.integer(forKey: "WeReadTotalOpenCount")
     }
 
     func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.title = "📖"
+            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+            if let image = NSImage(systemSymbolName: "book.pages", accessibilityDescription: "WeRead Drawer")?.withSymbolConfiguration(config) {
+                image.isTemplate = true
+                button.image = image
+            } else if let fallback = NSImage(systemSymbolName: "book", accessibilityDescription: "WeRead Drawer")?.withSymbolConfiguration(config) {
+                fallback.isTemplate = true
+                button.image = fallback
+            } else {
+                button.title = "📖"
+            }
             button.action = #selector(toggleDrawer)
             button.target = self
         }
         let menu = NSMenu()
+        let statsItem = NSMenuItem(title: statsSummaryString(), action: nil, keyEquivalent: "")
+        statsItem.isEnabled = false
+        menu.addItem(statsItem)
+        statsMenuItem = statsItem
+        menu.addItem(NSMenuItem.separator())
+
         menu.addItem(NSMenuItem(title: "显示/隐藏抽屉 (⌥+S)", action: #selector(toggleDrawer), keyEquivalent: "s"))
         let pinItem = NSMenuItem(title: "固定窗口 (阻止自动隐藏)", action: #selector(togglePin), keyEquivalent: "p")
+        pinItem.state = isPinned ? .on : .off
         menu.addItem(pinItem)
+
+        let autoLaunchItem = NSMenuItem(title: "开机自启动", action: #selector(toggleAutoLaunch), keyEquivalent: "")
+        autoLaunchItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(autoLaunchItem)
+
+        menu.addItem(NSMenuItem.separator())
+        let widthMenu = NSMenu()
+        let w420 = NSMenuItem(title: "精简 (420px)", action: #selector(setWidthPreset(_:)), keyEquivalent: "")
+        w420.tag = 420
+        widthMenu.addItem(w420)
+        let w520 = NSMenuItem(title: "标准 (520px)", action: #selector(setWidthPreset(_:)), keyEquivalent: "")
+        w520.tag = 520
+        widthMenu.addItem(w520)
+        let w680 = NSMenuItem(title: "宽屏 (680px)", action: #selector(setWidthPreset(_:)), keyEquivalent: "")
+        w680.tag = 680
+        widthMenu.addItem(w680)
+        let w840 = NSMenuItem(title: "沉浸 (840px)", action: #selector(setWidthPreset(_:)), keyEquivalent: "")
+        w840.tag = 840
+        widthMenu.addItem(w840)
+        let widthItem = NSMenuItem(title: "抽屉宽度预设", action: nil, keyEquivalent: "")
+        widthItem.submenu = widthMenu
+        menu.addItem(widthItem)
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "回到书架", action: #selector(goShelf), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "刷新页面", action: #selector(reloadPage), keyEquivalent: "r"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "q"))
+        menu.delegate = self
         statusItem.menu = menu
     }
 
@@ -136,18 +279,63 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         let rect = NSRect(x: vis.maxX - drawerWidth, y: vis.minY, width: drawerWidth, height: vis.height)
         panel = WeReadPanel(contentRect: rect)
         panel.minSize = NSSize(width: 380, height: 400)
+        panel.onEscapePressed = { [weak self] in
+            self?.hideDrawer()
+        }
+        panel.onResignKey = { [weak self] in
+            guard let self = self, !self.isPinned, self.panel.isVisible else { return }
+            DispatchQueue.main.async {
+                self.hideDrawer()
+            }
+        }
+
+        resizeHandle = ResizeHandleView(frame: NSRect(x: 0, y: 0, width: 6, height: rect.height))
+        resizeHandle.autoresizingMask = [.height]
+        resizeHandle.onResize = { [weak self] deltaX in
+            guard let self = self else { return }
+            let screen = self.currentActiveScreen()
+            let vis = screen.visibleFrame
+            let newWidth = min(max(self.panel.frame.width + deltaX, 380), min(1400, vis.width * 0.85))
+            self.drawerWidth = newWidth
+            let newFrame = NSRect(x: vis.maxX - newWidth, y: vis.minY, width: newWidth, height: vis.height)
+            self.panel.setFrame(newFrame, display: true)
+        }
+        resizeHandle.onResizeEnded = { [weak self] in
+            guard let self = self else { return }
+            UserDefaults.standard.set(Double(self.drawerWidth), forKey: "WeReadDrawerWidth")
+        }
+        panel.contentView?.addSubview(resizeHandle, positioned: .above, relativeTo: nil)
     }
 
     func setupHandle() {
-        guard let screen = NSScreen.main else { return }
+        let screen = currentActiveScreen()
         let frame = screen.frame
         let handleWidth: CGFloat = 16
         handlePanel = HandlePanel(contentRect: NSRect(x: frame.maxX - handleWidth, y: frame.minY, width: handleWidth, height: frame.height))
         handleView = HandleView(frame: NSRect(x: 0, y: 0, width: handleWidth, height: frame.height))
         handleView.onClick = { [weak self] in self?.showDrawer() }
+        handleView.onDragOpen = { [weak self] in self?.showDrawer() }
+        handleView.onHoverOpen = { [weak self] in self?.showDrawer() }
         handlePanel.contentView = handleView
     }
 
+    func setupScreenObserver() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            let screen = self.currentActiveScreen()
+            let vis = screen.visibleFrame
+            if self.panel.isVisible {
+                let target = NSRect(x: vis.maxX - self.drawerWidth, y: vis.minY, width: self.drawerWidth, height: vis.height)
+                self.panel.setFrame(target, display: true)
+            } else {
+                self.showHandle()
+            }
+        }
+    }
     func setupWebView() {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = WKWebsiteDataStore.default()
@@ -185,14 +373,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     }
 
     func setupGlobalHotKey() {
-        var hotKeyID = EventHotKeyID(signature: OSType(0x57524452), id: 1)
+        let hotKeyID = EventHotKeyID(signature: OSType(0x57524452), id: 1)
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: OSType(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { (_, _, userData) -> OSStatus in
-            let delegate = unsafeBitCast(userData, to: AppDelegate.self)
-            DispatchQueue.main.async { delegate.toggleDrawer() }
+            guard let ptr = userData else { return noErr }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(ptr).takeUnretainedValue()
+            DispatchQueue.main.async {
+                delegate.toggleDrawer()
+            }
             return noErr
-        }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), nil)
-        RegisterEventHotKey(UInt32(kVK_ANSI_S), UInt32(optionKey), hotKeyID, GetApplicationEventTarget(), 0, &globalHotKeyRef)
+        }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &hotKeyEventHandler)
+        let status = RegisterEventHotKey(UInt32(kVK_ANSI_S), UInt32(optionKey), hotKeyID, GetApplicationEventTarget(), 0, &globalHotKeyRef)
+        if status != noErr {
+            NSLog("[WeReadDrawer] 注册全局快捷键 ⌥+S 失败，错误码: %d", status)
+        }
     }
 
     func loadWeRead() {
@@ -204,24 +398,58 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     }
 
     func showDrawer() {
+        guard !isAnimating else { return }
+        if !panel.isVisible {
+            openCount += 1
+            currentSessionStartTime = Date()
+            UserDefaults.standard.set(openCount, forKey: "WeReadTotalOpenCount")
+            updateStatsMenuItem()
+        }
         let screen = currentActiveScreen()
         let visible = screen.visibleFrame
         let target = NSRect(x: visible.maxX - drawerWidth, y: visible.minY, width: drawerWidth, height: visible.height)
-        panel.setFrame(target, display: true)
+        let offscreen = NSRect(x: visible.maxX, y: visible.minY, width: drawerWidth, height: visible.height)
+
+        handlePanel.orderOut(nil)
+        panel.setFrame(offscreen, display: false)
         panel.orderFrontRegardless()
         panel.makeKey()
-        handlePanel.orderOut(nil)
+
+        isAnimating = true
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().setFrame(target, display: true)
+        }, completionHandler: { [weak self] in
+            self?.isAnimating = false
+        })
     }
 
     func hideDrawer() {
+        guard !isAnimating && panel.isVisible else { return }
+        recordSessionTime()
         drawerWidth = panel.frame.width
         UserDefaults.standard.set(Double(drawerWidth), forKey: "WeReadDrawerWidth")
-        panel.orderOut(nil)
-        showHandle()
+
+        let screen = currentActiveScreen()
+        let visible = screen.visibleFrame
+        let offscreen = NSRect(x: visible.maxX, y: visible.minY, width: drawerWidth, height: visible.height)
+
+        isAnimating = true
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.20
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().setFrame(offscreen, display: true)
+        }, completionHandler: { [weak self] in
+            guard let self = self else { return }
+            self.panel.orderOut(nil)
+            self.isAnimating = false
+            self.showHandle()
+        })
     }
 
     func showHandle() {
-        guard let screen = NSScreen.main else { return }
+        let screen = currentActiveScreen()
         let frame = screen.frame
         let handleWidth: CGFloat = 16
         handlePanel.setFrame(NSRect(x: frame.maxX - handleWidth, y: frame.minY, width: handleWidth, height: frame.height), display: true)
@@ -266,20 +494,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
                 }
             }
         }
-
-        mouseCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
-            guard let self = self, self.panel.isVisible, !self.isPinned else { return }
-            let mouse = NSEvent.mouseLocation
-            if self.panel.frame.contains(mouse) || self.handlePanel.frame.contains(mouse) {
-                self.outsideHoverCount = 0
-            } else {
-                self.outsideHoverCount += 1
-                if self.outsideHoverCount >= 4 {
-                    self.outsideHoverCount = 0
-                    self.hideDrawer()
-                }
-            }
-        }
     }
 
     @objc func togglePin() {
@@ -290,11 +504,74 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         }
     }
 
+    @objc func toggleAutoLaunch() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            NSLog("[WeReadDrawer] 切换开机自启动失败: %@", error.localizedDescription)
+        }
+        if let item = statusItem.menu?.items.first(where: { $0.action == #selector(toggleAutoLaunch) }) {
+            item.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        }
+    }
+
+    @objc func setWidthPreset(_ sender: NSMenuItem) {
+        drawerWidth = CGFloat(sender.tag)
+        UserDefaults.standard.set(Double(drawerWidth), forKey: "WeReadDrawerWidth")
+        if panel.isVisible {
+            let screen = currentActiveScreen()
+            let vis = screen.visibleFrame
+            let newFrame = NSRect(x: vis.maxX - drawerWidth, y: vis.minY, width: drawerWidth, height: vis.height)
+            panel.setFrame(newFrame, display: true)
+        }
+    }
+
     @objc func reloadPage() { webView.reload() }
     @objc func goShelf() {
         if let url = URL(string: "https://weread.qq.com/web/shelf") { webView.load(URLRequest(url: url)) }
     }
     @objc func quitApp() { NSApplication.shared.terminate(nil) }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        recordSessionTime()
+        if let hotKey = globalHotKeyRef {
+            UnregisterEventHotKey(hotKey)
+        }
+        if let handler = hotKeyEventHandler {
+            RemoveEventHandler(handler)
+        }
+    }
+
+    private func recordSessionTime() {
+        if let start = currentSessionStartTime {
+            let elapsed = Date().timeIntervalSince(start)
+            totalSeconds += elapsed
+            UserDefaults.standard.set(totalSeconds, forKey: "WeReadTotalReadSeconds")
+            currentSessionStartTime = nil
+            updateStatsMenuItem()
+        }
+    }
+
+    private func statsSummaryString() -> String {
+        var liveSeconds = totalSeconds
+        if let start = currentSessionStartTime {
+            liveSeconds += Date().timeIntervalSince(start)
+        }
+        let minutes = Int(liveSeconds / 60)
+        return "📊 阅读统计: \(minutes) 分钟 / 打开 \(openCount) 次"
+    }
+
+    private func updateStatsMenuItem() {
+        statsMenuItem?.title = statsSummaryString()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        updateStatsMenuItem()
+    }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         if navigationAction.targetFrame == nil {
@@ -315,4 +592,3 @@ app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()
-
