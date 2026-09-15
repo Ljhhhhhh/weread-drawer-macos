@@ -12,7 +12,8 @@ swiftc Sources/main.swift \
     -o "${OUTPUT_DIR}/Contents/MacOS/${APP_NAME}" \
     -framework Cocoa \
     -framework WebKit \
-    -framework Carbon
+    -framework Carbon \
+    -framework SwiftUI
 
 cp Resources/Info.plist "${OUTPUT_DIR}/Contents/Info.plist"
 

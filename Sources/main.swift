@@ -2,6 +2,7 @@ import Cocoa
 import WebKit
 import Carbon
 import ServiceManagement
+import SwiftUI
 
 class HandlePanel: NSPanel {
     init(contentRect: NSRect) {
@@ -157,6 +158,9 @@ class WeReadPanel: NSPanel {
         self.isMovableByWindowBackground = false
         self.backgroundColor = NSColor.windowBackgroundColor
         self.hasShadow = true
+        self.standardWindowButton(.closeButton)?.isHidden = true
+        self.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        self.standardWindowButton(.zoomButton)?.isHidden = true
     }
     override var canBecomeKey: Bool { return true }
 
@@ -170,7 +174,13 @@ class WeReadPanel: NSPanel {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSMenuDelegate {
+enum ThemeMode: String {
+    case auto = "auto"
+    case light = "light"
+    case dark = "dark"
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSMenuDelegate, NSWindowDelegate {
     var statusItem: NSStatusItem!
     var panel: WeReadPanel!
     var handlePanel: HandlePanel!
@@ -180,12 +190,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     var drawerWidth: CGFloat = 520
     var isAnimating: Bool = false
     var globalHotKeyRef: EventHotKeyRef?
+    var themeHotKeyRef: EventHotKeyRef?
     var hotKeyEventHandler: EventHandlerRef?
+    var themeMode: ThemeMode = .auto
     var isPinned: Bool = false
     private var totalSeconds: TimeInterval = 0
     private var openCount: Int = 0
+    private var dailySeconds: [String: Double] = [:]
+    private var dailyOpenCounts: [String: Int] = [:]
     private var currentSessionStartTime: Date?
     private var statsMenuItem: NSMenuItem?
+    private var statsWindowController: NSWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         loadSavedSettings()
@@ -193,6 +208,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         setupPanel()
         setupHandle()
         setupWebView()
+        setupThemeObserver()
         setupGlobalHotKey()
         setupAutoHiding()
         setupScreenObserver()
@@ -205,6 +221,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         if saved >= 380 && saved <= 1400 { drawerWidth = CGFloat(saved) }
         totalSeconds = UserDefaults.standard.double(forKey: "WeReadTotalReadSeconds")
         openCount = UserDefaults.standard.integer(forKey: "WeReadTotalOpenCount")
+        dailySeconds = UserDefaults.standard.dictionary(forKey: "WeReadDailyReadSeconds") as? [String: Double] ?? [:]
+        dailyOpenCounts = UserDefaults.standard.dictionary(forKey: "WeReadDailyOpenCounts") as? [String: Int] ?? [:]
+        if let rawMode = UserDefaults.standard.string(forKey: "WeReadThemeMode"),
+           let savedMode = ThemeMode(rawValue: rawMode) {
+            themeMode = savedMode
+        }
     }
 
     func setupStatusItem() {
@@ -224,10 +246,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             button.target = self
         }
         let menu = NSMenu()
-        let statsItem = NSMenuItem(title: statsSummaryString(), action: nil, keyEquivalent: "")
-        statsItem.isEnabled = false
-        menu.addItem(statsItem)
-        statsMenuItem = statsItem
+        let statsMenu = NSMenu()
+        let todayItem = NSMenuItem(title: "今日: 0 分钟 / 打开 0 次", action: nil, keyEquivalent: "")
+        todayItem.isEnabled = false
+        statsMenu.addItem(todayItem)
+        let totalItem = NSMenuItem(title: "累计: 0 分钟 / 打开 0 次", action: nil, keyEquivalent: "")
+        totalItem.isEnabled = false
+        statsMenu.addItem(totalItem)
+        statsMenu.addItem(NSMenuItem.separator())
+        statsMenu.addItem(NSMenuItem(title: "打开详细统计看板...", action: #selector(openStatsDashboard), keyEquivalent: ""))
+        let statsRootItem = NSMenuItem(title: "📊 今日: 0 分钟 · 累计: 0 分钟", action: nil, keyEquivalent: "")
+        statsRootItem.submenu = statsMenu
+        menu.addItem(statsRootItem)
+        statsMenuItem = statsRootItem
         menu.addItem(NSMenuItem.separator())
 
         menu.addItem(NSMenuItem(title: "显示/隐藏抽屉 (⌥+S)", action: #selector(toggleDrawer), keyEquivalent: "s"))
@@ -256,6 +287,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         let widthItem = NSMenuItem(title: "抽屉宽度预设", action: nil, keyEquivalent: "")
         widthItem.submenu = widthMenu
         menu.addItem(widthItem)
+
+        let themeItem = NSMenuItem(title: "外观主题", action: nil, keyEquivalent: "")
+        let themeMenu = NSMenu()
+        themeMenu.addItem(NSMenuItem(title: "跟随系统", action: #selector(setThemeAuto), keyEquivalent: ""))
+        themeMenu.addItem(NSMenuItem(title: "亮色模式", action: #selector(setThemeLight), keyEquivalent: ""))
+        themeMenu.addItem(NSMenuItem(title: "暗色模式 (快捷键 ⌥+T)", action: #selector(setThemeDark), keyEquivalent: ""))
+        themeItem.submenu = themeMenu
+        menu.addItem(themeItem)
+
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "回到书架", action: #selector(goShelf), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "刷新页面", action: #selector(reloadPage), keyEquivalent: "r"))
@@ -349,9 +389,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         body, html { overflow-x: hidden !important; padding-top: 10px !important; }
         ::-webkit-scrollbar { width: 4px !important; }
         ::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, 0.25) !important; border-radius: 2px !important; }
-        @media (prefers-color-scheme: dark) {
-            body, .readerChapterContent, .app_content { background-color: #19191A !important; color: #D1D1D6 !important; }
-        }
         """
         let cssB64 = Data(cssClean.utf8).base64EncodedString()
         let cssJS = "let s = document.createElement('style'); s.innerHTML = atob('" + cssB64 + "'); document.head.appendChild(s);"
@@ -373,19 +410,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     }
 
     func setupGlobalHotKey() {
-        let hotKeyID = EventHotKeyID(signature: OSType(0x57524452), id: 1)
+        let toggleDrawerID = EventHotKeyID(signature: OSType(0x57524452), id: 1)
+        let toggleThemeID = EventHotKeyID(signature: OSType(0x57524452), id: 2)
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: OSType(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { (_, _, userData) -> OSStatus in
+        InstallEventHandler(GetApplicationEventTarget(), { (_, eventRef, userData) -> OSStatus in
             guard let ptr = userData else { return noErr }
             let delegate = Unmanaged<AppDelegate>.fromOpaque(ptr).takeUnretainedValue()
+            var hotKeyID = EventHotKeyID()
+            GetEventParameter(eventRef, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
             DispatchQueue.main.async {
-                delegate.toggleDrawer()
+                if hotKeyID.id == 1 {
+                    delegate.toggleDrawer()
+                } else if hotKeyID.id == 2 {
+                    delegate.toggleThemeMode()
+                }
             }
             return noErr
         }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &hotKeyEventHandler)
-        let status = RegisterEventHotKey(UInt32(kVK_ANSI_S), UInt32(optionKey), hotKeyID, GetApplicationEventTarget(), 0, &globalHotKeyRef)
-        if status != noErr {
-            NSLog("[WeReadDrawer] 注册全局快捷键 ⌥+S 失败，错误码: %d", status)
+        let s1 = RegisterEventHotKey(UInt32(kVK_ANSI_S), UInt32(optionKey), toggleDrawerID, GetApplicationEventTarget(), 0, &globalHotKeyRef)
+        let s2 = RegisterEventHotKey(UInt32(kVK_ANSI_T), UInt32(optionKey), toggleThemeID, GetApplicationEventTarget(), 0, &themeHotKeyRef)
+        if s1 != noErr || s2 != noErr {
+            NSLog("[WeReadDrawer] 注册全局快捷键结果: ⌥+S code=%d, ⌥+T code=%d", s1, s2)
         }
     }
 
@@ -401,7 +446,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         guard !isAnimating else { return }
         if !panel.isVisible {
             openCount += 1
+            let today = todayKey()
+            dailyOpenCounts[today, default: 0] += 1
             currentSessionStartTime = Date()
+            UserDefaults.standard.set(dailyOpenCounts, forKey: "WeReadDailyOpenCounts")
             UserDefaults.standard.set(openCount, forKey: "WeReadTotalOpenCount")
             updateStatsMenuItem()
         }
@@ -422,6 +470,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             panel.animator().setFrame(target, display: true)
         }, completionHandler: { [weak self] in
             self?.isAnimating = false
+            self?.applyCurrentTheme()
         })
     }
 
@@ -530,6 +579,114 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         }
     }
 
+    func setupThemeObserver() {
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            if self.themeMode == .auto {
+                self.applyCurrentTheme()
+            }
+        }
+    }
+
+    func isEffectiveDark() -> Bool {
+        switch themeMode {
+        case .dark: return true
+        case .light: return false
+        case .auto:
+            return NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        }
+    }
+
+    func applyCurrentTheme() {
+        let dark = isEffectiveDark()
+        panel.appearance = dark ? NSAppearance(named: .darkAqua) : NSAppearance(named: .aqua)
+        webView.appearance = panel.appearance
+        panel.backgroundColor = dark ? NSColor(red: 0.15, green: 0.15, blue: 0.16, alpha: 1.0) : NSColor(red: 0.96, green: 0.97, blue: 0.98, alpha: 1.0)
+
+        // 纯粹调用微信读书官方自带的切换机制，不添加任何自定义 CSS 覆写
+        let js = """
+        (function(targetDark) {
+            const isCurrentlyWhite = document.body && document.body.classList.contains("wr_whiteTheme");
+            const isCurrentlyDark = !isCurrentlyWhite;
+            if (targetDark === isCurrentlyDark) return;
+
+            // 1. 阅读器内：点击微信读书官方自带的亮色/暗色切换按钮
+            if (targetDark) {
+                // 当前为浅色，需切换为深色：触发包含 dark 类名的按钮（月亮图标）
+                const darkBtn = document.querySelector(".readerControls_item.dark, .readerControls button.dark, .rbsp_color_item.dark, button[title*='深色']");
+                if (darkBtn) { darkBtn.click(); return; }
+            } else {
+                // 当前为深色，需切换为浅色：触发包含 white 类名的按钮（太阳图标）
+                const whiteBtn = document.querySelector(".readerControls_item.white, .readerControls button.white, .rbsp_color_item.white, button[title*='浅色']");
+                if (whiteBtn) { whiteBtn.click(); return; }
+            }
+
+            // 兜底：直接触发阅读器内的主题切换按钮
+            const anyThemeBtn = document.querySelector(".readerControls_item.white, .readerControls_item.dark, .readerControls button.white, .readerControls button.dark");
+            if (anyThemeBtn) { anyThemeBtn.click(); return; }
+
+            // 2. 非阅读页（书架、主页）：调用官方 Vuex Store 的 toggleTheme 动作
+            try {
+                const root = document.getElementById("app") || document.querySelector(".app") || document.body;
+                const store = (root && root.__vue__ && root.__vue__.$store) ? root.__vue__.$store : null;
+                if (store && store.dispatch) {
+                    store.dispatch("toggleTheme", { isWhite: !targetDark, modifyCookie: true });
+                }
+            } catch(e) {}
+        })(\(dark));
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    @objc func toggleThemeMode() {
+        // 快捷键 ⌥+T：直接触发微信读书官方阅读器自带的主题切换按钮
+        let js = """
+        (function() {
+            const btn = document.querySelector(".readerControls_item.white, .readerControls_item.dark, .readerControls button.white, .readerControls button.dark");
+            if (btn) {
+                btn.click();
+                return true;
+            }
+            return false;
+        })();
+        """
+        webView.evaluateJavaScript(js) { [weak self] (res, _) in
+            guard let self = self else { return }
+            if (res as? Bool) != true {
+                let currentDark = self.isEffectiveDark()
+                self.themeMode = currentDark ? .light : .dark
+                UserDefaults.standard.set(self.themeMode.rawValue, forKey: "WeReadThemeMode")
+                self.applyCurrentTheme()
+            }
+        }
+    }
+
+    @objc func setThemeAuto() {
+        themeMode = .auto
+        UserDefaults.standard.set(themeMode.rawValue, forKey: "WeReadThemeMode")
+        applyCurrentTheme()
+    }
+
+    @objc func setThemeLight() {
+        themeMode = .light
+        UserDefaults.standard.set(themeMode.rawValue, forKey: "WeReadThemeMode")
+        applyCurrentTheme()
+    }
+
+    @objc func setThemeDark() {
+        themeMode = .dark
+        UserDefaults.standard.set(themeMode.rawValue, forKey: "WeReadThemeMode")
+        applyCurrentTheme()
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        applyCurrentTheme()
+    }
+
     @objc func reloadPage() { webView.reload() }
     @objc func goShelf() {
         if let url = URL(string: "https://weread.qq.com/web/shelf") { webView.load(URLRequest(url: url)) }
@@ -541,6 +698,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         if let hotKey = globalHotKeyRef {
             UnregisterEventHotKey(hotKey)
         }
+        if let themeHotKey = themeHotKeyRef {
+            UnregisterEventHotKey(themeHotKey)
+        }
         if let handler = hotKeyEventHandler {
             RemoveEventHandler(handler)
         }
@@ -549,28 +709,130 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     private func recordSessionTime() {
         if let start = currentSessionStartTime {
             let elapsed = Date().timeIntervalSince(start)
+            let today = todayKey()
             totalSeconds += elapsed
+            dailySeconds[today, default: 0] += elapsed
             UserDefaults.standard.set(totalSeconds, forKey: "WeReadTotalReadSeconds")
+            UserDefaults.standard.set(dailySeconds, forKey: "WeReadDailyReadSeconds")
             currentSessionStartTime = nil
             updateStatsMenuItem()
         }
     }
 
-    private func statsSummaryString() -> String {
-        var liveSeconds = totalSeconds
-        if let start = currentSessionStartTime {
-            liveSeconds += Date().timeIntervalSince(start)
-        }
-        let minutes = Int(liveSeconds / 60)
-        return "📊 阅读统计: \(minutes) 分钟 / 打开 \(openCount) 次"
+    private func todayKey(for date: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
     }
 
     private func updateStatsMenuItem() {
-        statsMenuItem?.title = statsSummaryString()
+        let today = todayKey()
+        var todaySec = dailySeconds[today] ?? 0
+        var totalSec = totalSeconds
+        if let start = currentSessionStartTime {
+            let live = Date().timeIntervalSince(start)
+            todaySec += live
+            totalSec += live
+        }
+        let todayMins = Int(todaySec / 60)
+        let totalMins = Int(totalSec / 60)
+        let todayOpens = dailyOpenCounts[today] ?? 0
+
+        statsMenuItem?.title = "📊 今日: \(todayMins) 分钟 · 累计: \(totalMins) 分钟"
+        if let sub = statsMenuItem?.submenu, sub.items.count >= 2 {
+            sub.items[0].title = "今日阅读: \(todayMins) 分钟 / 打开 \(todayOpens) 次"
+            sub.items[1].title = "历史累计: \(totalMins) 分钟 / 打开 \(openCount) 次"
+        }
+    }
+
+    @objc func openStatsDashboard() {
+        let today = todayKey()
+        var todaySec = dailySeconds[today] ?? 0
+        var totalSec = totalSeconds
+        if let start = currentSessionStartTime {
+            let live = Date().timeIntervalSince(start)
+            todaySec += live
+            totalSec += live
+        }
+        let todayMins = Int(todaySec / 60)
+        let totalMins = Int(totalSec / 60)
+        let todayOpens = dailyOpenCounts[today] ?? 0
+
+        let cal = Calendar.current
+        let now = Date()
+        let fmtDay = DateFormatter()
+        fmtDay.dateFormat = "M/d"
+
+        var recentList: [StatsDayItem] = []
+        for i in (0..<7).reversed() {
+            if let date = cal.date(byAdding: .day, value: -i, to: now) {
+                let key = todayKey(for: date)
+                var sec = dailySeconds[key] ?? 0
+                if i == 0, let start = currentSessionStartTime {
+                    sec += Date().timeIntervalSince(start)
+                }
+                let mins = Int(sec / 60)
+                let opens = dailyOpenCounts[key] ?? 0
+                let label = i == 0 ? "今天" : fmtDay.string(from: date)
+                recentList.append(StatsDayItem(dateKey: key, label: label, minutes: mins, opens: opens, isToday: i == 0))
+            }
+        }
+
+        let contentView = StatsDashboardView(
+            todayMinutes: todayMins,
+            todayOpens: todayOpens,
+            totalMinutes: totalMins,
+            totalOpens: openCount,
+            recentDays: recentList
+        )
+
+        if let controller = statsWindowController, let window = controller.window {
+            window.contentView = NSHostingView(rootView: contentView)
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 490),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "阅读统计看板"
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.contentView = NSHostingView(rootView: contentView)
+
+        let controller = NSWindowController(window: window)
+        statsWindowController = controller
+        window.delegate = self
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if let closingWindow = notification.object as? NSWindow, closingWindow == statsWindowController?.window {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 
     func menuWillOpen(_ menu: NSMenu) {
         updateStatsMenuItem()
+        if let themeItem = statusItem.menu?.items.first(where: { $0.submenu != nil && $0.title.contains("外观主题") }),
+           let sub = themeItem.submenu {
+            for item in sub.items {
+                switch item.action {
+                case #selector(setThemeAuto): item.state = themeMode == .auto ? .on : .off
+                case #selector(setThemeLight): item.state = themeMode == .light ? .on : .off
+                case #selector(setThemeDark): item.state = themeMode == .dark ? .on : .off
+                default: break
+                }
+            }
+        }
     }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
@@ -585,6 +847,108 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { webView.reload() }
+}
+
+struct StatsDayItem: Identifiable {
+    var id: String { dateKey }
+    let dateKey: String
+    let label: String
+    let minutes: Int
+    let opens: Int
+    let isToday: Bool
+}
+
+struct StatsDashboardView: View {
+    let todayMinutes: Int
+    let todayOpens: Int
+    let totalMinutes: Int
+    let totalOpens: Int
+    let recentDays: [StatsDayItem]
+
+    private var maxMins: Int {
+        max(recentDays.map { $0.minutes }.max() ?? 1, 30)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("阅读统计看板")
+                        .font(.system(size: 20, weight: .bold))
+                    Text("追踪每日阅读节奏与历史沉淀")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Image(systemName: "book.pages.fill")
+                    .font(.system(size: 28))
+                    .foregroundStyle(.linearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+            }
+
+            HStack(spacing: 12) {
+                statCard(title: "今日专注", primaryText: "\(todayMinutes) 分钟", subText: "打开 \(todayOpens) 次", icon: "flame.fill", color: .orange)
+                statCard(title: "历史累计", primaryText: "\(totalMinutes) 分钟", subText: "打开 \(totalOpens) 次", icon: "clock.arrow.circlepath", color: .blue)
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("近 7 天趋势")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.secondary)
+
+                HStack(alignment: .bottom, spacing: 10) {
+                    ForEach(recentDays) { item in
+                        VStack(spacing: 6) {
+                            Text("\(item.minutes)m")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(item.isToday ? .accentColor : .secondary)
+
+                            GeometryReader { geo in
+                                VStack {
+                                    Spacer(minLength: 0)
+                                    RoundedRectangle(cornerRadius: 5)
+                                        .fill(item.isToday ? Color.accentColor : Color.secondary.opacity(0.25))
+                                        .frame(height: max(CGFloat(item.minutes) / CGFloat(maxMins) * geo.size.height, 4))
+                                }
+                            }
+                            .frame(height: 110)
+
+                            Text(item.label)
+                                .font(.system(size: 11, weight: item.isToday ? .bold : .regular))
+                                .foregroundColor(item.isToday ? .primary : .secondary)
+                        }
+                    }
+                }
+                .padding(.vertical, 10)
+                .padding(.horizontal, 8)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor).opacity(0.6)))
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(26)
+        .padding(.top, 14)
+        .frame(width: 440, height: 480)
+    }
+
+    private func statCard(title: String, primaryText: String, subText: String, icon: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: icon)
+                    .foregroundColor(color)
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            Text(primaryText)
+                .font(.system(size: 22, weight: .bold, design: .rounded))
+            Text(subText)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+    }
 }
 
 let app = NSApplication.shared
