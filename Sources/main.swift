@@ -121,9 +121,26 @@ class ResizeHandleView: NSView {
 
 class WeReadWebView: WKWebView {
     var onScrollPage: ((Bool) -> Void)?
+    var canTurnPage: (() -> Bool)?
     private var lastScrollTime: TimeInterval = 0
+    private var lastPreciseScrollTime: TimeInterval = 0
+    private var preciseScrollOffset: CGFloat = 0
+    private var preciseGestureTriggered = false
+    private var gestureResetWorkItem: DispatchWorkItem?
+    private let trackpadPageThreshold: CGFloat = 36
 
     override func scrollWheel(with event: NSEvent) {
+        guard canTurnPage?() == true else {
+            resetPreciseGesture()
+            super.scrollWheel(with: event)
+            return
+        }
+
+        if event.hasPreciseScrollingDeltas {
+            handlePreciseScroll(event)
+            return
+        }
+
         let delta = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.deltaY
         if abs(delta) >= 3 {
             let now = Date().timeIntervalSince1970
@@ -137,6 +154,109 @@ class WeReadWebView: WKWebView {
             }
         }
         super.scrollWheel(with: event)
+    }
+
+    private func handlePreciseScroll(_ event: NSEvent) {
+        let now = event.timestamp
+        if event.phase == .began || now - lastPreciseScrollTime > 0.24 {
+            preciseScrollOffset = 0
+            preciseGestureTriggered = false
+        }
+        lastPreciseScrollTime = now
+
+        if !preciseGestureTriggered {
+            preciseScrollOffset += event.scrollingDeltaY
+            if abs(preciseScrollOffset) >= trackpadPageThreshold {
+                preciseGestureTriggered = true
+                onScrollPage?(preciseScrollOffset < 0)
+            }
+        }
+
+        gestureResetWorkItem?.cancel()
+        let reset = DispatchWorkItem { [weak self] in
+            self?.resetPreciseGesture()
+        }
+        gestureResetWorkItem = reset
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24, execute: reset)
+    }
+
+    private func resetPreciseGesture() {
+        gestureResetWorkItem?.cancel()
+        gestureResetWorkItem = nil
+        preciseScrollOffset = 0
+        preciseGestureTriggered = false
+    }
+}
+
+class PageTurnFeedbackView: NSView {
+    private var forward = true
+    private var hideWorkItem: DispatchWorkItem?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isHidden = true
+        alphaValue = 0
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func show(direction: Bool) {
+        forward = direction
+        setAccessibilityLabel(direction ? "下一页" : "上一页")
+        hideWorkItem?.cancel()
+        isHidden = false
+        alphaValue = 0
+        needsDisplay = true
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            animator().alphaValue = 1
+        }
+
+        let hide = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.16
+                context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                self.animator().alphaValue = 0
+            }, completionHandler: {
+                self.isHidden = true
+            })
+        }
+        hideWorkItem = hide
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.62, execute: hide)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let size = NSSize(width: 148, height: 48)
+        let rect = NSRect(x: bounds.midX - size.width / 2, y: 28, width: size.width, height: size.height)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 14, yRadius: 14)
+        NSColor.controlBackgroundColor.withAlphaComponent(0.94).setFill()
+        path.fill()
+        NSColor.separatorColor.withAlphaComponent(0.55).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        let symbolName = forward ? "arrow.down.circle.fill" : "arrow.up.circle.fill"
+        let symbolRect = NSRect(x: rect.minX + 14, y: rect.minY + 13, width: 22, height: 22)
+        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
+            image.draw(in: symbolRect)
+        }
+
+        let title = forward ? "下一页" : "上一页"
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 14, weight: .medium),
+            .foregroundColor: NSColor.labelColor
+        ]
+        title.draw(at: NSPoint(x: rect.minX + 44, y: rect.minY + 16), withAttributes: attributes)
     }
 }
 
@@ -187,6 +307,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     var handleView: HandleView!
     var webView: WeReadWebView!
     var resizeHandle: ResizeHandleView!
+    var pageTurnFeedbackView: PageTurnFeedbackView!
     var drawerWidth: CGFloat = 520
     var isAnimating: Bool = false
     var globalHotKeyRef: EventHotKeyRef?
@@ -323,10 +444,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             self?.hideDrawer()
         }
         panel.onResignKey = { [weak self] in
-            guard let self = self, !self.isPinned, self.panel.isVisible else { return }
-            DispatchQueue.main.async {
-                self.hideDrawer()
-            }
+            guard let self = self else { return }
+            self.scheduleHideIfNeeded()
         }
 
         resizeHandle = ResizeHandleView(frame: NSRect(x: 0, y: 0, width: 6, height: rect.height))
@@ -401,12 +520,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         webView.uiDelegate = self
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15"
         
-        // 核心：监听鼠标滚轮触发翻页！
+        // 核心：监听鼠标滚轮与触控板手势触发翻页。
         webView.onScrollPage = { [weak self] forward in
-            self?.flipPage(forward: forward)
+            guard let self = self else { return }
+            self.flipPage(forward: forward)
+            self.pageTurnFeedbackView.show(direction: forward)
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        }
+        webView.canTurnPage = { [weak self] in
+            self?.webView.url?.path.contains("/web/reader/") == true
         }
 
         panel.contentView?.addSubview(webView)
+        pageTurnFeedbackView = PageTurnFeedbackView(frame: webView.bounds)
+        pageTurnFeedbackView.autoresizingMask = [.width, .height]
+        panel.contentView?.addSubview(pageTurnFeedbackView, positioned: .above, relativeTo: webView)
     }
 
     func setupGlobalHotKey() {
@@ -535,22 +663,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
 
     func setupAutoHiding() {
         NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.scheduleHideIfNeeded()
+        }
+    }
+
+    private func scheduleHideIfNeeded() {
+        DispatchQueue.main.async { [weak self] in
             guard let self = self, self.panel.isVisible, !self.isPinned else { return }
             let mouse = NSEvent.mouseLocation
-            if !self.panel.frame.contains(mouse) && !self.handlePanel.frame.contains(mouse) {
-                DispatchQueue.main.async {
-                    self.hideDrawer()
-                }
-            }
+            if self.panel.frame.contains(mouse) || self.handlePanel.frame.contains(mouse) { return }
+            self.hideDrawer()
         }
     }
 
     @objc func togglePin() {
         isPinned.toggle()
-        if let item = statusItem.menu?.items[1] {
-            item.title = isPinned ? "取消固定 (允许自动隐藏)" : "固定窗口 (阻止自动隐藏)"
-            item.state = isPinned ? .on : .off
-        }
+        updatePinMenuItem()
+    }
+
+    private func updatePinMenuItem() {
+        guard let item = statusItem.menu?.items.first(where: { $0.action == #selector(togglePin) }) else { return }
+        item.title = isPinned ? "取消固定 (允许自动隐藏)" : "固定窗口 (阻止自动隐藏)"
+        item.state = isPinned ? .on : .off
     }
 
     @objc func toggleAutoLaunch() {
