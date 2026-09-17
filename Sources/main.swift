@@ -304,6 +304,11 @@ enum ThemeMode: String {
     case dark = "dark"
 }
 
+enum VerticalAlignment: String {
+    case bottom = "bottom"
+    case top = "top"
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSMenuDelegate, NSWindowDelegate {
     var statusItem: NSStatusItem!
     var panel: WeReadPanel!
@@ -313,6 +318,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     var resizeHandle: ResizeHandleView!
     var pageTurnFeedbackView: PageTurnFeedbackView!
     var drawerWidth: CGFloat = 520
+    var maxHeightRatio: CGFloat = 1.0
+    var verticalAlignment: VerticalAlignment = .bottom
     var isAnimating: Bool = false
     var globalHotKeyRef: EventHotKeyRef?
     var themeHotKeyRef: EventHotKeyRef?
@@ -344,6 +351,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     func loadSavedSettings() {
         let saved = UserDefaults.standard.double(forKey: "WeReadDrawerWidth")
         if saved >= 380 && saved <= 1400 { drawerWidth = CGFloat(saved) }
+        let savedHeight = UserDefaults.standard.double(forKey: "WeReadMaxHeightRatio")
+        if savedHeight > 0 && savedHeight <= 1.0 { maxHeightRatio = CGFloat(savedHeight) }
+        if let rawAlign = UserDefaults.standard.string(forKey: "WeReadVerticalAlignment"),
+           let savedAlign = VerticalAlignment(rawValue: rawAlign) {
+            verticalAlignment = savedAlign
+        }
         totalSeconds = UserDefaults.standard.double(forKey: "WeReadTotalReadSeconds")
         openCount = UserDefaults.standard.integer(forKey: "WeReadTotalOpenCount")
         dailySeconds = UserDefaults.standard.dictionary(forKey: "WeReadDailyReadSeconds") as? [String: Double] ?? [:]
@@ -413,6 +426,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         widthItem.submenu = widthMenu
         menu.addItem(widthItem)
 
+        let heightMenu = NSMenu()
+        let hFull = NSMenuItem(title: "全屏高度 (100%)", action: #selector(setMaxHeightPreset(_:)), keyEquivalent: "")
+        hFull.tag = 100
+        heightMenu.addItem(hFull)
+        let h85 = NSMenuItem(title: "85% 高度", action: #selector(setMaxHeightPreset(_:)), keyEquivalent: "")
+        h85.tag = 85
+        heightMenu.addItem(h85)
+        let h70 = NSMenuItem(title: "70% 高度", action: #selector(setMaxHeightPreset(_:)), keyEquivalent: "")
+        h70.tag = 70
+        heightMenu.addItem(h70)
+        let h55 = NSMenuItem(title: "55% 高度", action: #selector(setMaxHeightPreset(_:)), keyEquivalent: "")
+        h55.tag = 55
+        heightMenu.addItem(h55)
+        heightMenu.addItem(NSMenuItem.separator())
+        let alignBottom = NSMenuItem(title: "贴底对齐", action: #selector(setVerticalAlignBottom), keyEquivalent: "")
+        heightMenu.addItem(alignBottom)
+        let alignTop = NSMenuItem(title: "贴顶对齐", action: #selector(setVerticalAlignTop), keyEquivalent: "")
+        heightMenu.addItem(alignTop)
+        let heightItem = NSMenuItem(title: "抽屉高度与对齐", action: nil, keyEquivalent: "")
+        heightItem.submenu = heightMenu
+        menu.addItem(heightItem)
+
         let themeItem = NSMenuItem(title: "外观主题", action: nil, keyEquivalent: "")
         let themeMenu = NSMenu()
         themeMenu.addItem(NSMenuItem(title: "跟随系统", action: #selector(setThemeAuto), keyEquivalent: ""))
@@ -440,9 +475,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
 
     func setupPanel() {
         let screen = currentActiveScreen()
-        let vis = screen.visibleFrame
-        let rect = NSRect(x: vis.maxX - drawerWidth, y: vis.minY, width: drawerWidth, height: vis.height)
+        let rect = targetFrame(for: screen)
         panel = WeReadPanel(contentRect: rect)
+        panel.delegate = self
         panel.minSize = NSSize(width: 380, height: 400)
         panel.onEscapePressed = { [weak self] in
             self?.hideDrawer()
@@ -460,8 +495,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             let vis = screen.visibleFrame
             let newWidth = min(max(self.panel.frame.width + deltaX, 380), min(1400, vis.width * 0.85))
             self.drawerWidth = newWidth
-            let newFrame = NSRect(x: vis.maxX - newWidth, y: vis.minY, width: newWidth, height: vis.height)
-            self.panel.setFrame(newFrame, display: true)
+            self.updatePanelFrame(animated: false)
         }
         resizeHandle.onResizeEnded = { [weak self] in
             guard let self = self else { return }
@@ -499,10 +533,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             guard let self = self else { return }
             let screen = NSScreen.screens.first { $0 == self.drawerScreen } ?? self.currentActiveScreen()
             self.drawerScreen = screen
-            let vis = screen.visibleFrame
             if self.panel.isVisible {
-                let target = NSRect(x: vis.maxX - self.drawerWidth, y: vis.minY, width: self.drawerWidth, height: vis.height)
-                self.panel.setFrame(target, display: true)
+                self.updatePanelFrame(animated: false)
             }
             self.setupHandle()
         }
@@ -578,6 +610,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         if let url = URL(string: "https://weread.qq.com") { webView.load(URLRequest(url: url)) }
     }
 
+    func targetFrame(for screen: NSScreen, width: CGFloat? = nil) -> NSRect {
+        let vis = screen.visibleFrame
+        let w = width ?? drawerWidth
+        let effectiveHeight = min(vis.height, max(400, vis.height * maxHeightRatio))
+        let y = (verticalAlignment == .top) ? (vis.maxY - effectiveHeight) : vis.minY
+        return NSRect(x: vis.maxX - w, y: y, width: w, height: effectiveHeight)
+    }
+
+    func updatePanelFrame(animated: Bool = false) {
+        guard panel != nil else { return }
+        let screen = drawerScreen ?? currentActiveScreen()
+        let frame = targetFrame(for: screen)
+        if animated {
+            panel.animator().setFrame(frame, display: true)
+        } else {
+            panel.setFrame(frame, display: true)
+        }
+    }
+
     @objc func toggleDrawer() {
         if panel.isVisible { hideDrawer() } else { showDrawer() }
     }
@@ -597,8 +648,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             updateStatsMenuItem()
         }
         let visible = screen.visibleFrame
-        let target = NSRect(x: visible.maxX - drawerWidth, y: visible.minY, width: drawerWidth, height: visible.height)
-        let offscreen = NSRect(x: visible.maxX, y: visible.minY, width: drawerWidth, height: visible.height)
+        let target = targetFrame(for: screen)
+        let offscreen = NSRect(x: visible.maxX, y: target.minY, width: target.width, height: target.height)
 
         panel.setFrame(offscreen, display: false)
         panel.orderFrontRegardless()
@@ -618,13 +669,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
 
     func hideDrawer() {
         guard !isAnimating && panel.isVisible else { return }
+        saveVerticalAlignment()
         recordSessionTime()
         drawerWidth = panel.frame.width
         UserDefaults.standard.set(Double(drawerWidth), forKey: "WeReadDrawerWidth")
 
         let screen = drawerScreen ?? currentActiveScreen()
         let visible = screen.visibleFrame
-        let offscreen = NSRect(x: visible.maxX, y: visible.minY, width: drawerWidth, height: visible.height)
+        let current = panel.frame
+        let offscreen = NSRect(x: visible.maxX, y: current.minY, width: current.width, height: current.height)
 
         isAnimating = true
         NSAnimationContext.runAnimationGroup({ context in
@@ -723,10 +776,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         drawerWidth = CGFloat(sender.tag)
         UserDefaults.standard.set(Double(drawerWidth), forKey: "WeReadDrawerWidth")
         if panel.isVisible {
-            let screen = drawerScreen ?? currentActiveScreen()
-            let vis = screen.visibleFrame
-            let newFrame = NSRect(x: vis.maxX - drawerWidth, y: vis.minY, width: drawerWidth, height: vis.height)
-            panel.setFrame(newFrame, display: true)
+            updatePanelFrame(animated: true)
+        }
+    }
+
+    @objc func setMaxHeightPreset(_ sender: NSMenuItem) {
+        maxHeightRatio = CGFloat(sender.tag) / 100.0
+        UserDefaults.standard.set(Double(maxHeightRatio), forKey: "WeReadMaxHeightRatio")
+        if panel.isVisible {
+            updatePanelFrame(animated: true)
+        }
+    }
+
+    @objc func setVerticalAlignBottom() {
+        verticalAlignment = .bottom
+        UserDefaults.standard.set(verticalAlignment.rawValue, forKey: "WeReadVerticalAlignment")
+        if panel.isVisible {
+            updatePanelFrame(animated: true)
+        }
+    }
+
+    @objc func setVerticalAlignTop() {
+        verticalAlignment = .top
+        UserDefaults.standard.set(verticalAlignment.rawValue, forKey: "WeReadVerticalAlignment")
+        if panel.isVisible {
+            updatePanelFrame(animated: true)
         }
     }
 
@@ -965,6 +1039,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         window.makeKeyAndOrderFront(nil)
     }
 
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === panel else { return }
+        let screen = drawerScreen ?? window.screen ?? currentActiveScreen()
+        saveVerticalAlignment()
+        maxHeightRatio = min(1, window.frame.height / screen.visibleFrame.height)
+        drawerWidth = window.frame.width
+        UserDefaults.standard.set(Double(maxHeightRatio), forKey: "WeReadMaxHeightRatio")
+        UserDefaults.standard.set(Double(drawerWidth), forKey: "WeReadDrawerWidth")
+        updatePanelFrame()
+    }
+
+    private func saveVerticalAlignment() {
+        let visible = (drawerScreen ?? panel.screen ?? currentActiveScreen()).visibleFrame
+        let bottomGap = abs(panel.frame.minY - visible.minY)
+        let topGap = abs(panel.frame.maxY - visible.maxY)
+        // Full-height windows do not indicate a preferred edge.
+        guard abs(bottomGap - topGap) > 1 else { return }
+        verticalAlignment = bottomGap < topGap ? .bottom : .top
+        UserDefaults.standard.set(verticalAlignment.rawValue, forKey: "WeReadVerticalAlignment")
+    }
+
     func windowWillClose(_ notification: Notification) {
         if let closingWindow = notification.object as? NSWindow, closingWindow == statsWindowController?.window {
             NSApp.setActivationPolicy(.accessory)
@@ -981,6 +1076,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
                 case #selector(setThemeLight): item.state = themeMode == .light ? .on : .off
                 case #selector(setThemeDark): item.state = themeMode == .dark ? .on : .off
                 default: break
+                }
+            }
+        }
+        if let heightItem = statusItem.menu?.items.first(where: { $0.submenu != nil && $0.title.contains("抽屉高度与对齐") }),
+           let sub = heightItem.submenu {
+            for item in sub.items {
+                if item.action == #selector(setMaxHeightPreset(_:)) {
+                    let tagRatio = CGFloat(item.tag) / 100.0
+                    item.state = abs(maxHeightRatio - tagRatio) < 0.01 ? .on : .off
+                } else if item.action == #selector(setVerticalAlignBottom) {
+                    item.state = verticalAlignment == .bottom ? .on : .off
+                } else if item.action == #selector(setVerticalAlignTop) {
+                    item.state = verticalAlignment == .top ? .on : .off
                 }
             }
         }
