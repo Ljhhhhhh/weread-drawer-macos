@@ -53,6 +53,10 @@ class HandleView: NSView {
     }
 
     override func mouseExited(with event: NSEvent) {
+        resetHover()
+    }
+
+    func resetHover() {
         isHovered = false
         needsDisplay = true
         hoverTimer?.invalidate()
@@ -303,8 +307,8 @@ enum ThemeMode: String {
 class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSMenuDelegate, NSWindowDelegate {
     var statusItem: NSStatusItem!
     var panel: WeReadPanel!
-    var handlePanel: HandlePanel!
-    var handleView: HandleView!
+    var handles: [(screen: NSScreen, panel: HandlePanel)] = []
+    var drawerScreen: NSScreen?
     var webView: WeReadWebView!
     var resizeHandle: ResizeHandleView!
     var pageTurnFeedbackView: PageTurnFeedbackView!
@@ -452,7 +456,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         resizeHandle.autoresizingMask = [.height]
         resizeHandle.onResize = { [weak self] deltaX in
             guard let self = self else { return }
-            let screen = self.currentActiveScreen()
+            let screen = self.drawerScreen ?? self.currentActiveScreen()
             let vis = screen.visibleFrame
             let newWidth = min(max(self.panel.frame.width + deltaX, 380), min(1400, vis.width * 0.85))
             self.drawerWidth = newWidth
@@ -467,15 +471,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     }
 
     func setupHandle() {
-        let screen = currentActiveScreen()
-        let frame = screen.frame
-        let handleWidth: CGFloat = 16
-        handlePanel = HandlePanel(contentRect: NSRect(x: frame.maxX - handleWidth, y: frame.minY, width: handleWidth, height: frame.height))
-        handleView = HandleView(frame: NSRect(x: 0, y: 0, width: handleWidth, height: frame.height))
-        handleView.onClick = { [weak self] in self?.showDrawer() }
-        handleView.onDragOpen = { [weak self] in self?.showDrawer() }
-        handleView.onHoverOpen = { [weak self] in self?.showDrawer() }
-        handlePanel.contentView = handleView
+        for handle in handles {
+            (handle.panel.contentView as? HandleView)?.resetHover()
+            handle.panel.orderOut(nil)
+        }
+        handles = NSScreen.screens.map { screen in
+            let frame = screen.frame
+            let handleWidth: CGFloat = 16
+            let handlePanel = HandlePanel(contentRect: NSRect(x: frame.maxX - handleWidth, y: frame.minY, width: handleWidth, height: frame.height))
+            let handleView = HandleView(frame: NSRect(x: 0, y: 0, width: handleWidth, height: frame.height))
+            let open: () -> Void = { [weak self] in self?.showDrawer(on: screen) }
+            handleView.onClick = open
+            handleView.onDragOpen = open
+            handleView.onHoverOpen = open
+            handlePanel.contentView = handleView
+            return (screen, handlePanel)
+        }
+        showHandle()
     }
 
     func setupScreenObserver() {
@@ -485,14 +497,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             queue: .main
         ) { [weak self] _ in
             guard let self = self else { return }
-            let screen = self.currentActiveScreen()
+            let screen = NSScreen.screens.first { $0 == self.drawerScreen } ?? self.currentActiveScreen()
+            self.drawerScreen = screen
             let vis = screen.visibleFrame
             if self.panel.isVisible {
                 let target = NSRect(x: vis.maxX - self.drawerWidth, y: vis.minY, width: self.drawerWidth, height: vis.height)
                 self.panel.setFrame(target, display: true)
-            } else {
-                self.showHandle()
             }
+            self.setupHandle()
         }
     }
     func setupWebView() {
@@ -570,8 +582,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         if panel.isVisible { hideDrawer() } else { showDrawer() }
     }
 
-    func showDrawer() {
+    func showDrawer(on requestedScreen: NSScreen? = nil) {
         guard !isAnimating else { return }
+        let screen = requestedScreen ?? currentActiveScreen()
+        guard !panel.isVisible || drawerScreen != screen else { return }
+        drawerScreen = screen
         if !panel.isVisible {
             openCount += 1
             let today = todayKey()
@@ -581,15 +596,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             UserDefaults.standard.set(openCount, forKey: "WeReadTotalOpenCount")
             updateStatsMenuItem()
         }
-        let screen = currentActiveScreen()
         let visible = screen.visibleFrame
         let target = NSRect(x: visible.maxX - drawerWidth, y: visible.minY, width: drawerWidth, height: visible.height)
         let offscreen = NSRect(x: visible.maxX, y: visible.minY, width: drawerWidth, height: visible.height)
 
-        handlePanel.orderOut(nil)
         panel.setFrame(offscreen, display: false)
         panel.orderFrontRegardless()
         panel.makeKey()
+        showHandle()
 
         isAnimating = true
         NSAnimationContext.runAnimationGroup({ context in
@@ -608,7 +622,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         drawerWidth = panel.frame.width
         UserDefaults.standard.set(Double(drawerWidth), forKey: "WeReadDrawerWidth")
 
-        let screen = currentActiveScreen()
+        let screen = drawerScreen ?? currentActiveScreen()
         let visible = screen.visibleFrame
         let offscreen = NSRect(x: visible.maxX, y: visible.minY, width: drawerWidth, height: visible.height)
 
@@ -626,11 +640,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     }
 
     func showHandle() {
-        let screen = currentActiveScreen()
-        let frame = screen.frame
-        let handleWidth: CGFloat = 16
-        handlePanel.setFrame(NSRect(x: frame.maxX - handleWidth, y: frame.minY, width: handleWidth, height: frame.height), display: true)
-        handlePanel.orderFrontRegardless()
+        for handle in handles {
+            if panel.isVisible && handle.screen == drawerScreen {
+                (handle.panel.contentView as? HandleView)?.resetHover()
+                handle.panel.orderOut(nil)
+            } else {
+                handle.panel.orderFrontRegardless()
+            }
+        }
     }
 
     // 核心翻页动作：向下翻页寻找【下一页】按钮，向上翻页寻找【上一页】按钮，并用箭头键兜底！
@@ -671,7 +688,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.panel.isVisible, !self.isPinned else { return }
             let mouse = NSEvent.mouseLocation
-            if self.panel.frame.contains(mouse) || self.handlePanel.frame.contains(mouse) { return }
+            if self.panel.frame.contains(mouse) || self.handles.contains(where: { $0.panel.isVisible && $0.panel.frame.contains(mouse) }) { return }
             self.hideDrawer()
         }
     }
@@ -706,7 +723,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         drawerWidth = CGFloat(sender.tag)
         UserDefaults.standard.set(Double(drawerWidth), forKey: "WeReadDrawerWidth")
         if panel.isVisible {
-            let screen = currentActiveScreen()
+            let screen = drawerScreen ?? currentActiveScreen()
             let vis = screen.visibleFrame
             let newFrame = NSRect(x: vis.maxX - drawerWidth, y: vis.minY, width: drawerWidth, height: vis.height)
             panel.setFrame(newFrame, display: true)
