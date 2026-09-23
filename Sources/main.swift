@@ -113,6 +113,54 @@ class DrawerDragView: NSView {
     }
 }
 
+final class CatalogButton: NSButton {
+    private var hoverArea: NSTrackingArea?
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+
+    override func updateTrackingAreas() {
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        contentTintColor = .labelColor
+        needsDisplay = true
+    }
+    override func mouseExited(with event: NSEvent) {
+        contentTintColor = .secondaryLabelColor
+        needsDisplay = true
+    }
+}
+
+final class CatalogHotspotView: NSView {
+    var onHoverChange: ((Bool) -> Void)?
+    private var hoverArea: NSTrackingArea?
+    private(set) var isPointerInside = false
+
+    override func updateTrackingAreas() {
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isPointerInside = true
+        onHoverChange?(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isPointerInside = false
+        onHoverChange?(false)
+    }
+}
+
 class ResizeHandleView: NSView {
     var onResize: ((CGFloat) -> Void)?
     var onResizeEnded: (() -> Void)?
@@ -142,6 +190,7 @@ class ResizeHandleView: NSView {
 class WeReadWebView: WKWebView {
     var onScrollPage: ((Bool) -> Void)?
     var canTurnPage: (() -> Bool)?
+    var isCatalogOpen = false
     private var lastScrollTime: TimeInterval = 0
     private var lastPreciseScrollTime: TimeInterval = 0
     private var preciseScrollOffset: CGFloat = 0
@@ -150,7 +199,7 @@ class WeReadWebView: WKWebView {
     private let trackpadPageThreshold: CGFloat = 36
 
     override func scrollWheel(with event: NSEvent) {
-        guard canTurnPage?() == true else {
+        guard !isCatalogOpen && canTurnPage?() == true else {
             resetPreciseGesture()
             super.scrollWheel(with: event)
             return
@@ -325,7 +374,7 @@ enum VerticalAlignment: String {
     case top = "top"
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSMenuDelegate, NSWindowDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, NSMenuDelegate, NSWindowDelegate {
     var statusItem: NSStatusItem!
     var panel: WeReadPanel!
     var handles: [(screen: NSScreen, panel: HandlePanel)] = []
@@ -333,6 +382,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     var webView: WeReadWebView!
     var resizeHandle: ResizeHandleView!
     var pageTurnFeedbackView: PageTurnFeedbackView!
+    var catalogButton: NSButton?
+    var catalogHotspot: CatalogHotspotView?
+    private var webViewURLObservation: NSKeyValueObservation?
     var drawerWidth: CGFloat = 520
     var maxHeightRatio: CGFloat = 1.0
     var verticalAlignment: VerticalAlignment = .bottom
@@ -580,18 +632,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         body, html { overflow-x: hidden !important; padding-top: 10px !important; }
         ::-webkit-scrollbar { width: 4px !important; }
         ::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, 0.25) !important; border-radius: 2px !important; }
+        .readerCatalog {
+            left: auto !important;
+            right: 12px !important;
+            top: 42px !important;
+            width: min(440px, calc(100vw - 24px)) !important;
+            max-height: calc(100vh - 54px) !important;
+            border-radius: 14px !important;
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18) !important;
+            z-index: 9999 !important;
+        }
+        html[data-drawer-catalog-open="true"] .reader_toolbar_container,
+        html[data-drawer-catalog-open="true"] .wr_selection { display: none !important; }
         """
         let cssB64 = Data(cssClean.utf8).base64EncodedString()
         let cssJS = "let s = document.createElement('style'); s.innerHTML = atob('" + cssB64 + "'); document.head.appendChild(s);"
         let script = WKUserScript(source: cssJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         config.userContentController.addUserScript(script)
+        config.userContentController.add(self, name: "catalogClosed")
 
+        let toolbarHeight: CGFloat = 36
         var readingBounds = panel.contentView!.bounds
-        readingBounds.size.height -= 24
+        readingBounds.size.height -= toolbarHeight
         webView = WeReadWebView(frame: readingBounds, configuration: config)
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        webViewURLObservation = webView.observe(\.url, options: [.initial, .new]) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                self?.updateCatalogButtonVisibility()
+            }
+        }
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15"
         
         // 核心：监听鼠标滚轮与触控板手势触发翻页。
@@ -607,7 +678,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
 
         panel.contentView?.addSubview(webView)
         panel.contentView?.addSubview(resizeHandle, positioned: .above, relativeTo: webView)
-        let dragView = DrawerDragView(frame: NSRect(x: 6, y: readingBounds.height, width: readingBounds.width - 12, height: 24))
+        let dragView = DrawerDragView(frame: NSRect(x: 6, y: readingBounds.height, width: readingBounds.width - 12, height: toolbarHeight))
         dragView.autoresizingMask = [.width, .minYMargin]
         dragView.toolTip = "拖动到屏幕任意一角；也可在菜单中选择抽屉位置"
         dragView.onDrop = { [weak self] point in
@@ -618,6 +689,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         pageTurnFeedbackView = PageTurnFeedbackView(frame: webView.bounds)
         pageTurnFeedbackView.autoresizingMask = [.width, .height]
         panel.contentView?.addSubview(pageTurnFeedbackView, positioned: .above, relativeTo: webView)
+        let hotspot = CatalogHotspotView(frame: NSRect(x: panel.contentView!.bounds.width - 84, y: readingBounds.height, width: 78, height: toolbarHeight))
+        hotspot.autoresizingMask = [.minXMargin, .minYMargin]
+        hotspot.onHoverChange = { [weak self] _ in self?.updateCatalogButtonVisibility() }
+        panel.contentView?.addSubview(hotspot, positioned: .above, relativeTo: dragView)
+        catalogHotspot = hotspot
+        let catalogBtn = CatalogButton(title: "目录", target: self, action: #selector(toggleCatalog))
+        catalogBtn.frame = NSRect(x: 6, y: 5, width: 66, height: 26)
+        catalogBtn.isBordered = false
+        catalogBtn.image = NSImage(systemSymbolName: "list.number", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .medium))
+        catalogBtn.imagePosition = .imageLeading
+        catalogBtn.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        catalogBtn.contentTintColor = .secondaryLabelColor
+        catalogBtn.focusRingType = .default
+        catalogBtn.toolTip = "当前书籍目录"
+        catalogBtn.setAccessibilityLabel("打开或关闭当前书籍目录")
+        catalogBtn.isEnabled = false
+        catalogBtn.isHidden = true
+        hotspot.addSubview(catalogBtn)
+        self.catalogButton = catalogBtn
     }
 
     func setupGlobalHotKey() {
@@ -967,6 +1058,63 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         applyCurrentTheme()
+        updateCatalogButtonVisibility()
+    }
+
+    private func updateCatalogButtonVisibility() {
+        let isReader = webView.url?.host == "weread.qq.com" && webView.url?.path.hasPrefix("/web/reader/") == true
+        if !isReader { webView.isCatalogOpen = false }
+        catalogButton?.isHidden = !isReader || catalogHotspot?.isPointerInside != true
+        catalogButton?.isEnabled = isReader
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "catalogClosed" { webView.isCatalogOpen = false }
+    }
+
+    @objc func toggleCatalog() {
+        guard webView.url?.path.contains("/web/reader/") == true else {
+            return
+        }
+
+        webView.isCatalogOpen.toggle()
+
+        let js = """
+        (function() {
+            const catalog = document.querySelector('.readerCatalog');
+            if (!catalog || !catalog.querySelector('.readerCatalog_list_item')) return null;
+            if (!catalog.dataset.drawerCatalogBound) {
+                catalog.addEventListener('click', event => {
+                    if (event.target.closest('.readerCatalog_list_item')) {
+                        catalog.style.setProperty('display', 'none', 'important');
+                        delete document.documentElement.dataset.drawerCatalogOpen;
+                        window.webkit.messageHandlers.catalogClosed.postMessage(null);
+                    }
+                });
+                catalog.dataset.drawerCatalogBound = 'true';
+            }
+            const isOpen = getComputedStyle(catalog).display !== 'none';
+            catalog.style.setProperty('display', isOpen ? 'none' : 'flex', 'important');
+            if (isOpen) {
+                delete document.documentElement.dataset.drawerCatalogOpen;
+            } else {
+                window.getSelection()?.removeAllRanges();
+                document.documentElement.dataset.drawerCatalogOpen = 'true';
+            }
+            return !isOpen;
+        })();
+        """
+        webView.evaluateJavaScript(js) { [weak self] result, error in
+            guard let self = self else { return }
+            guard error == nil, let isOpen = result as? Bool else {
+                self.webView.isCatalogOpen = false
+                self.catalogButton?.toolTip = "目录不可用，请刷新阅读页"
+                NSLog("[WeReadDrawer] 目录按钮未找到或执行失败: %@", error?.localizedDescription ?? "missing catalog")
+                return
+            }
+            self.webView.isCatalogOpen = isOpen
+            self.catalogButton?.toolTip = "当前书籍目录"
+        }
     }
 
     @objc func reloadPage() { webView.reload() }
