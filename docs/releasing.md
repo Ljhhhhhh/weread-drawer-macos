@@ -9,15 +9,15 @@
 ## 准备发布文件
 
 1. 修改 `Resources/Info.plist` 中的 `CFBundleShortVersionString`（展示版本），并递增 `CFBundleVersion`（更新比较版本）。
-2. 执行 `./scripts/prepare-release.sh`。脚本校验钥匙串公钥，构建双架构应用，生成 ZIP、签名的 `appcast.xml` 和 `SHA256SUMS`，输出到 `build/release/`。
+2. 执行 `./scripts/prepare-release.sh`。脚本校验钥匙串公钥，构建双架构应用，生成拖放安装 DMG、签名的 `appcast.xml` 和 `SHA256SUMS`，输出到 `build/release/`。DMG 内包含应用和指向 `/Applications` 的快捷方式，自动更新也使用同一份 DMG。
 3. 提交并推送源代码，使用与展示版本一致的 `v<版本>` 标签创建 GitHub Release，将三个发布文件全部上传后再公开发布，并将稳定版本设为 Latest。
 
-更新器读取最新 Release 中的 `appcast.xml`，其中的安装包链接指向该版本固定标签下的 ZIP。请勿删除历史发布包，也不要把缺少更新源的 Release 设为 Latest。
+更新器读取最新 Release 中的 `appcast.xml`，其中的安装包链接指向该版本固定标签下的 DMG。请勿删除历史发布包，也不要把缺少更新源的 Release 设为 Latest。
 
 应用沿用 ad-hoc 代码签名，Sparkle 框架保留上游签名。更新包和更新源使用 Ed25519 签名；这不等同于 Apple Developer ID 签名或公证。首次安装仍可能受到 Gatekeeper 提示。
 
 ## 校验
 
-`prepare-release.sh` 会验证应用及嵌套框架的代码签名，并验证更新源签名。发布前还应核对 ZIP 内的版本、双架构二进制和更新源中的包大小及签名；发布后确认公开地址能够下载。
+`prepare-release.sh` 会验证应用及嵌套框架的代码签名，并验证 DMG 和更新源签名。发布前还应只读挂载 DMG，核对应用版本、双架构二进制及 Applications 快捷方式；发布后确认公开地址能够下载。
 
 完整更新验证需要用较低构建号的版本下载、安装并重新启动新版本。执行前先确认测试范围和是否保留可重复验证材料。

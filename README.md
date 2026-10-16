@@ -42,7 +42,7 @@
 
 ## 🛠️ 构建与安装
 
-从 [最新发布](https://github.com/Ljhhhhhh/weread-drawer-macos/releases/latest) 下载 macOS ZIP，解压后将 `WeReadDrawer.app` 移至“应用程序”文件夹运行。支持 Apple Silicon 和 Intel Mac。尚未包含更新功能的旧版本需要手动安装一次。
+从 [最新发布](https://github.com/Ljhhhhhh/weread-drawer-macos/releases/latest) 下载 macOS DMG 安装包，双击打开后将 `WeReadDrawer.app` 拖入旁边的 `Applications` 文件夹，再从“应用程序”启动。支持 Apple Silicon 和 Intel Mac。尚未包含更新功能的旧版本需要手动安装一次。
 
 应用未经过 Apple 公证；若 macOS 阻止打开，请在“系统设置 → 隐私与安全性”中确认来源后允许打开。
 
