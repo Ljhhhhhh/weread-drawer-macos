@@ -14,7 +14,7 @@
 
 更新器读取最新 Release 中的 `appcast.xml`，其中的安装包链接指向该版本固定标签下的 DMG。请勿删除历史发布包，也不要把缺少更新源的 Release 设为 Latest。
 
-应用沿用 ad-hoc 代码签名，Sparkle 框架保留上游签名。更新包和更新源使用 Ed25519 签名；这不等同于 Apple Developer ID 签名或公证。首次安装仍可能受到 Gatekeeper 提示。
+应用、Sparkle 框架及指定中文的更新助手使用 ad-hoc 代码签名。主应用和更新助手均通过 `CFBundleLocalizations` 声明简体中文，检查、下载和安装进度界面统一使用中文。更新包和更新源使用 Ed25519 签名；这不等同于 Apple Developer ID 签名或公证。首次安装仍可能受到 Gatekeeper 提示。
 
 ## 校验
 

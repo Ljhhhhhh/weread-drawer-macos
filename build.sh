@@ -25,6 +25,13 @@ done
 lipo -create "build/${APP_NAME}-arm64" "build/${APP_NAME}-x86_64" \
     -output "${OUTPUT_DIR}/Contents/MacOS/${APP_NAME}"
 ditto "${SPARKLE_DIR}/Sparkle.framework" "${OUTPUT_DIR}/Contents/Frameworks/Sparkle.framework"
+FRAMEWORK="${OUTPUT_DIR}/Contents/Frameworks/Sparkle.framework"
+UPDATER="${FRAMEWORK}/Versions/B/Updater.app"
+# 安装进度由独立进程显示，需要与主应用使用相同的语言。
+plutil -replace CFBundleDevelopmentRegion -string zh_CN "${UPDATER}/Contents/Info.plist"
+plutil -replace CFBundleLocalizations -json '["zh_CN"]' "${UPDATER}/Contents/Info.plist"
+codesign --force --sign - --preserve-metadata=entitlements "${UPDATER}"
+codesign --force --sign - "${FRAMEWORK}"
 cp "${SPARKLE_DIR}/LICENSE" "${OUTPUT_DIR}/Contents/Resources/Sparkle-LICENSE.txt"
 
 cp Resources/Info.plist "${OUTPUT_DIR}/Contents/Info.plist"
