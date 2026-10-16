@@ -83,5 +83,5 @@ with tempfile.TemporaryDirectory() as directory:
     swift = Path(directory) / 'main.swift'
     binary = Path(directory) / ('HeightCheck-' + Path(directory).name)
     swift.write_text(source + check)
-    subprocess.run(['swiftc', str(swift), '-o', str(binary), '-framework', 'Cocoa', '-framework', 'WebKit', '-framework', 'Carbon', '-framework', 'SwiftUI'], check=True)
+    subprocess.run(['swiftc', str(swift), '-o', str(binary), '-framework', 'Cocoa', '-framework', 'WebKit', '-framework', 'Carbon', '-framework', 'SwiftUI', '-F', str(root / '.dependencies/Sparkle'), '-framework', 'Sparkle', '-Xlinker', '-rpath', '-Xlinker', str(root / '.dependencies/Sparkle')], check=True)
     subprocess.run([str(binary)], check=True)

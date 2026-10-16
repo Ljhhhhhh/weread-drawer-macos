@@ -24,6 +24,7 @@ let delegate = CatalogTestDelegate()
 delegate.setupStatusItem()
 delegate.setupPanel()
 delegate.setupWebView()
+guard let readerWebView = delegate.webView else { fatalError("Reader web view was not created") }
 delegate.panel.orderFrontRegardless()
 delegate.updatePanelFrame()
 guard delegate.catalogButton?.isHidden == true else { fatalError("Catalog button should start hidden") }
@@ -44,7 +45,7 @@ func waitFor(_ condition: @escaping (@escaping (Bool) -> Void) -> Void, timeout:
 }
 
 func catalogState(_ done: @escaping (Bool) -> Void) {
-    delegate.webView.evaluateJavaScript("""
+    readerWebView.evaluateJavaScript("""
         (() => {
             const catalog = document.querySelector('.readerCatalog');
             const list = document.querySelector('.readerCatalog_list_scroll_area');
@@ -60,10 +61,10 @@ func catalogState(_ done: @escaping (Bool) -> Void) {
 }
 
 let readerURL = URL(string: "https://weread.qq.com/web/reader/a7a32960723fa2a6a7afb50")!
-delegate.webView.load(URLRequest(url: readerURL))
+readerWebView.load(URLRequest(url: readerURL))
 guard waitFor({ done in
-    guard delegate.readerLoaded, !delegate.webView.isLoading else { done(false); return }
-    delegate.webView.evaluateJavaScript("!!document.querySelector('button.readerControls_item.catalog') && document.querySelectorAll('.readerCatalog_list_item').length > 1") {
+    guard delegate.readerLoaded, !readerWebView.isLoading else { done(false); return }
+    readerWebView.evaluateJavaScript("!!document.querySelector('button.readerControls_item.catalog') && document.querySelectorAll('.readerCatalog_list_item').length > 1") {
         value, _ in done(value as? Bool == true)
     }
 }) else { fatalError("Live reader catalog did not load") }
@@ -77,16 +78,16 @@ guard button.isHidden else { fatalError("Catalog button should be hidden away fr
 hotspot.mouseEntered(with: pointerEvent)
 guard !button.isHidden else { fatalError("Hovering the top-right corner did not reveal the catalog button") }
 var pageTurns = 0
-delegate.webView.onScrollPage = { _ in pageTurns += 1 }
+readerWebView.onScrollPage = { _ in pageTurns += 1 }
 let wheel = NSEvent(cgEvent: CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: -4, wheel2: 0, wheel3: 0)!)!
 button.performClick(nil)
 guard waitFor(catalogState, timeout: 10) else { fatalError("Native button did not reveal a usable catalog") }
-guard delegate.webView.isCatalogOpen else { fatalError("Page turning was not paused while the catalog is open") }
-delegate.webView.scrollWheel(with: wheel)
+guard readerWebView.isCatalogOpen else { fatalError("Page turning was not paused while the catalog is open") }
+readerWebView.scrollWheel(with: wheel)
 guard pageTurns == 0 else { fatalError("Scrolling an open catalog turned the reading page") }
 
 var imageSaved = false
-delegate.webView.takeSnapshot(with: nil) { image, _ in
+readerWebView.takeSnapshot(with: nil) { image, _ in
     if let image = image,
        let tiff = image.tiffRepresentation,
        let bitmap = NSBitmapImageRep(data: tiff),
@@ -100,32 +101,32 @@ while !imageSaved && Date() < snapshotDeadline {
 }
 guard imageSaved else { fatalError("Could not capture the open catalog") }
 
-delegate.webView.evaluateJavaScript("document.querySelectorAll('.readerCatalog_list_item')[2].click()", completionHandler: nil)
+readerWebView.evaluateJavaScript("document.querySelectorAll('.readerCatalog_list_item')[2].click()", completionHandler: nil)
 guard waitFor({ done in
-    delegate.webView.evaluateJavaScript("getComputedStyle(document.querySelector('.readerCatalog')).display === 'none' && !document.documentElement.dataset.drawerCatalogOpen") {
+    readerWebView.evaluateJavaScript("getComputedStyle(document.querySelector('.readerCatalog')).display === 'none' && !document.documentElement.dataset.drawerCatalogOpen") {
         value, _ in done(value as? Bool == true)
     }
 }, timeout: 5) else { fatalError("Selecting a chapter did not close the catalog") }
-guard !delegate.webView.isCatalogOpen else { fatalError("Page turning was not restored after selecting a chapter") }
+guard !readerWebView.isCatalogOpen else { fatalError("Page turning was not restored after selecting a chapter") }
 
 button.performClick(nil)
 guard waitFor(catalogState, timeout: 5) else { fatalError("Native button did not reopen the catalog") }
-guard delegate.webView.isCatalogOpen else { fatalError("Page turning was not paused after reopening the catalog") }
+guard readerWebView.isCatalogOpen else { fatalError("Page turning was not paused after reopening the catalog") }
 button.performClick(nil)
 guard waitFor({ done in
-    delegate.webView.evaluateJavaScript("getComputedStyle(document.querySelector('.readerCatalog')).display === 'none' && !document.documentElement.dataset.drawerCatalogOpen") {
+    readerWebView.evaluateJavaScript("getComputedStyle(document.querySelector('.readerCatalog')).display === 'none' && !document.documentElement.dataset.drawerCatalogOpen") {
         value, _ in done(value as? Bool == true)
     }
 }, timeout: 5) else { fatalError("Second native click did not close the catalog") }
-guard !delegate.webView.isCatalogOpen else { fatalError("Page turning was not restored after closing the catalog") }
-delegate.webView.scrollWheel(with: wheel)
+guard !readerWebView.isCatalogOpen else { fatalError("Page turning was not restored after closing the catalog") }
+readerWebView.scrollWheel(with: wheel)
 guard pageTurns == 1 else { fatalError("Closing the catalog did not restore wheel page turning") }
 hotspot.mouseExited(with: pointerEvent)
 guard button.isHidden else { fatalError("Catalog button remained visible after leaving the corner") }
 
-delegate.webView.load(URLRequest(url: URL(string: "https://weread.qq.com/")!))
+readerWebView.load(URLRequest(url: URL(string: "https://weread.qq.com/")!))
 guard waitFor({ done in
-    done(delegate.webView.url?.path == "/" && button.isHidden)
+    done(readerWebView.url?.path == "/" && button.isHidden)
 }, timeout: 20) else { fatalError("Catalog button remained visible outside the reader") }
 
 let artifact: [String: Any] = [
@@ -153,7 +154,7 @@ with tempfile.TemporaryDirectory() as directory:
     swift = Path(directory) / "main.swift"
     binary = Path(directory) / "CatalogE2E"
     swift.write_text(source + check)
-    subprocess.run(["swiftc", str(swift), "-o", str(binary), "-framework", "Cocoa", "-framework", "WebKit", "-framework", "Carbon", "-framework", "SwiftUI"], check=True)
+    subprocess.run(["swiftc", str(swift), "-o", str(binary), "-framework", "Cocoa", "-framework", "WebKit", "-framework", "Carbon", "-framework", "SwiftUI", "-F", str(root / ".dependencies/Sparkle"), "-framework", "Sparkle", "-Xlinker", "-rpath", "-Xlinker", str(root / ".dependencies/Sparkle")], check=True)
     result = subprocess.run([str(binary), str(root)], capture_output=True, text=True, timeout=90)
     if result.returncode:
         raise RuntimeError(result.stdout + "\n" + result.stderr)

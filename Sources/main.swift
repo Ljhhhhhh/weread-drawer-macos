@@ -3,6 +3,7 @@ import WebKit
 import Carbon
 import ServiceManagement
 import SwiftUI
+import Sparkle
 
 class HandlePanel: NSPanel {
     init(contentRect: NSRect) {
@@ -408,6 +409,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     private var currentSessionStartTime: Date?
     private var statsMenuItem: NSMenuItem?
     private var statsWindowController: NSWindowController?
+    private let updaterController = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         loadSavedSettings()
@@ -422,6 +424,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         setupScreenObserver()
         loadWeRead()
         showDrawer()
+        updaterController.startUpdater()
     }
 
     func loadSavedSettings() {
@@ -542,6 +545,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         menu.addItem(NSMenuItem(title: "回到书架", action: #selector(goShelf), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "刷新页面", action: #selector(reloadPage), keyEquivalent: "r"))
         menu.addItem(NSMenuItem.separator())
+        let updateItem = NSMenuItem(title: "检查更新…", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
+        updateItem.target = updaterController
+        menu.addItem(updateItem)
         menu.addItem(NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "q"))
         menu.delegate = self
         statusItem.menu = menu
