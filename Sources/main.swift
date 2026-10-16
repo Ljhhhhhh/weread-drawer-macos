@@ -13,6 +13,7 @@ class HandlePanel: NSPanel {
             defer: false
         )
         self.isFloatingPanel = true
+        self.isReleasedWhenClosed = false
         self.level = .floating
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.backgroundColor = .clear
@@ -379,12 +380,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     var panel: WeReadPanel!
     var handles: [(screen: NSScreen, panel: HandlePanel)] = []
     var drawerScreen: NSScreen?
-    var webView: WeReadWebView!
+    var webView: WeReadWebView?
     var resizeHandle: ResizeHandleView!
     var pageTurnFeedbackView: PageTurnFeedbackView!
     var catalogButton: NSButton?
     var catalogHotspot: CatalogHotspotView?
     private var webViewURLObservation: NSKeyValueObservation?
+    private var webViewReleaseTimer: Timer?
+    private var suspendedURL: URL?
+    private var suspendedScroll: [Double]?
+    private var scrollToRestore: [Double]?
     var drawerWidth: CGFloat = 520
     var maxHeightRatio: CGFloat = 1.0
     var verticalAlignment: VerticalAlignment = .bottom
@@ -410,6 +415,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         setupPanel()
         setupHandle()
         setupWebView()
+        setupDrawerControls()
         setupThemeObserver()
         setupGlobalHotKey()
         setupAutoHiding()
@@ -584,7 +590,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     func setupHandle() {
         for handle in handles {
             (handle.panel.contentView as? HandleView)?.resetHover()
-            handle.panel.orderOut(nil)
+            handle.panel.close()
         }
         handles = NSScreen.screens.map { screen in
             let frame = screen.visibleFrame
@@ -654,7 +660,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         let toolbarHeight: CGFloat = 36
         var readingBounds = panel.contentView!.bounds
         readingBounds.size.height -= toolbarHeight
-        webView = WeReadWebView(frame: readingBounds, configuration: config)
+        let webView = WeReadWebView(frame: readingBounds, configuration: config)
+        self.webView = webView
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -673,11 +680,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
         }
         webView.canTurnPage = { [weak self] in
-            self?.webView.url?.path.contains("/web/reader/") == true
+            self?.webView?.url?.path.contains("/web/reader/") == true
         }
 
-        panel.contentView?.addSubview(webView)
-        panel.contentView?.addSubview(resizeHandle, positioned: .above, relativeTo: webView)
+        panel.contentView?.addSubview(webView, positioned: .below, relativeTo: resizeHandle)
+    }
+
+    func setupDrawerControls() {
+        let toolbarHeight: CGFloat = 36
+        var readingBounds = panel.contentView!.bounds
+        readingBounds.size.height -= toolbarHeight
         let dragView = DrawerDragView(frame: NSRect(x: 6, y: readingBounds.height, width: readingBounds.width - 12, height: toolbarHeight))
         dragView.autoresizingMask = [.width, .minYMargin]
         dragView.toolTip = "拖动到屏幕任意一角；也可在菜单中选择抽屉位置"
@@ -686,7 +698,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             self.snapDrawer(at: point, windowFrame: self.panel.frame)
         }
         panel.contentView?.addSubview(dragView, positioned: .above, relativeTo: webView)
-        pageTurnFeedbackView = PageTurnFeedbackView(frame: webView.bounds)
+        pageTurnFeedbackView = PageTurnFeedbackView(frame: readingBounds)
         pageTurnFeedbackView.autoresizingMask = [.width, .height]
         panel.contentView?.addSubview(pageTurnFeedbackView, positioned: .above, relativeTo: webView)
         let hotspot = CatalogHotspotView(frame: NSRect(x: panel.contentView!.bounds.width - 84, y: readingBounds.height, width: 78, height: toolbarHeight))
@@ -737,7 +749,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     }
 
     func loadWeRead() {
-        if let url = URL(string: "https://weread.qq.com") { webView.load(URLRequest(url: url)) }
+        if let url = URL(string: "https://weread.qq.com") { webView?.load(URLRequest(url: url)) }
+    }
+
+    private func resumeWebView() {
+        webViewReleaseTimer?.invalidate()
+        webViewReleaseTimer = nil
+        guard webView == nil else { return }
+        setupWebView()
+        scrollToRestore = suspendedScroll
+        if let url = suspendedURL {
+            webView?.load(URLRequest(url: url))
+        } else {
+            loadWeRead()
+        }
+        suspendedURL = nil
+        suspendedScroll = nil
+    }
+
+    private func scheduleWebViewRelease() {
+        webViewReleaseTimer?.invalidate()
+        suspendedScroll = nil
+        let timer = Timer(timeInterval: 10 * 60, repeats: false) { [weak self] _ in
+            guard let self = self, !self.panel.isVisible, let webView = self.webView else { return }
+            self.suspendedURL = webView.url
+            self.webViewURLObservation = nil
+            webView.stopLoading()
+            webView.navigationDelegate = nil
+            webView.uiDelegate = nil
+            webView.configuration.userContentController.removeScriptMessageHandler(forName: "catalogClosed")
+            webView.removeFromSuperview()
+            self.webView = nil
+            self.webViewReleaseTimer = nil
+            self.updateCatalogButtonVisibility()
+        }
+        webViewReleaseTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        webView?.evaluateJavaScript("[window.scrollX, window.scrollY]") { [weak self, weak timer] result, _ in
+            guard let self = self, let timer = timer, self.webViewReleaseTimer === timer else { return }
+            self.suspendedScroll = result as? [Double]
+        }
     }
 
     func targetFrame(for screen: NSScreen, width: CGFloat? = nil) -> NSRect {
@@ -798,6 +849,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
 
     func showDrawer(on requestedScreen: NSScreen? = nil) {
         guard !isAnimating else { return }
+        resumeWebView()
         let screen = requestedScreen ?? currentActiveScreen()
         guard !panel.isVisible || drawerScreen != screen else { return }
         drawerScreen = screen
@@ -852,6 +904,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             guard let self = self else { return }
             self.panel.orderOut(nil)
             self.isAnimating = false
+            self.scheduleWebViewRelease()
             self.showHandle()
         })
     }
@@ -891,7 +944,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             return 'dispatched key';
         })();
         """
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
 
@@ -977,7 +1030,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     func applyCurrentTheme() {
         let dark = isEffectiveDark()
         panel.appearance = dark ? NSAppearance(named: .darkAqua) : NSAppearance(named: .aqua)
-        webView.appearance = panel.appearance
+        webView?.appearance = panel.appearance
         panel.backgroundColor = dark ? NSColor(red: 0.15, green: 0.15, blue: 0.16, alpha: 1.0) : NSColor(red: 0.96, green: 0.97, blue: 0.98, alpha: 1.0)
 
         // 纯粹调用微信读书官方自带的切换机制，不添加任何自定义 CSS 覆写
@@ -1012,10 +1065,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             } catch(e) {}
         })(\(dark));
         """
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
     @objc func toggleThemeMode() {
+        guard webView != nil else {
+            themeMode = isEffectiveDark() ? .light : .dark
+            UserDefaults.standard.set(themeMode.rawValue, forKey: "WeReadThemeMode")
+            applyCurrentTheme()
+            return
+        }
         // 快捷键 ⌥+T：直接触发微信读书官方阅读器自带的主题切换按钮
         let js = """
         (function() {
@@ -1027,7 +1086,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             return false;
         })();
         """
-        webView.evaluateJavaScript(js) { [weak self] (res, _) in
+        webView?.evaluateJavaScript(js) { [weak self] (res, _) in
             guard let self = self else { return }
             if (res as? Bool) != true {
                 let currentDark = self.isEffectiveDark()
@@ -1057,22 +1116,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === self.webView else { return }
         applyCurrentTheme()
         updateCatalogButtonVisibility()
+        if let scroll = scrollToRestore, scroll.count == 2, scroll.allSatisfy({ $0.isFinite }) {
+            scrollToRestore = nil
+            webView.evaluateJavaScript("window.scrollTo(\(scroll[0]), \(scroll[1]))", completionHandler: nil)
+        }
     }
 
     private func updateCatalogButtonVisibility() {
-        let isReader = webView.url?.host == "weread.qq.com" && webView.url?.path.hasPrefix("/web/reader/") == true
-        if !isReader { webView.isCatalogOpen = false }
+        let isReader = webView?.url?.host == "weread.qq.com" && webView?.url?.path.hasPrefix("/web/reader/") == true
+        if !isReader { webView?.isCatalogOpen = false }
         catalogButton?.isHidden = !isReader || catalogHotspot?.isPointerInside != true
         catalogButton?.isEnabled = isReader
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        if message.name == "catalogClosed" { webView.isCatalogOpen = false }
+        if message.name == "catalogClosed" { webView?.isCatalogOpen = false }
     }
 
     @objc func toggleCatalog() {
+        guard let webView = webView else { return }
         guard webView.url?.path.contains("/web/reader/") == true else {
             return
         }
@@ -1107,19 +1172,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         webView.evaluateJavaScript(js) { [weak self] result, error in
             guard let self = self else { return }
             guard error == nil, let isOpen = result as? Bool else {
-                self.webView.isCatalogOpen = false
+                self.webView?.isCatalogOpen = false
                 self.catalogButton?.toolTip = "目录不可用，请刷新阅读页"
                 NSLog("[WeReadDrawer] 目录按钮未找到或执行失败: %@", error?.localizedDescription ?? "missing catalog")
                 return
             }
-            self.webView.isCatalogOpen = isOpen
+            self.webView?.isCatalogOpen = isOpen
             self.catalogButton?.toolTip = "当前书籍目录"
         }
     }
 
-    @objc func reloadPage() { webView.reload() }
+    @objc func reloadPage() {
+        if webView == nil { showDrawer() } else { webView?.reload() }
+    }
     @objc func goShelf() {
-        if let url = URL(string: "https://weread.qq.com/web/shelf") { webView.load(URLRequest(url: url)) }
+        resumeWebView()
+        scrollToRestore = nil
+        if let url = URL(string: "https://weread.qq.com/web/shelf") { webView?.load(URLRequest(url: url)) }
+        if !panel.isVisible { scheduleWebViewRelease() }
     }
     @objc func quitApp() { NSApplication.shared.terminate(nil) }
 
@@ -1280,6 +1350,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
 
     func windowWillClose(_ notification: Notification) {
         if let closingWindow = notification.object as? NSWindow, closingWindow == statsWindowController?.window {
+            closingWindow.contentView = nil
+            statsWindowController = nil
             NSApp.setActivationPolicy(.accessory)
         }
     }
@@ -1323,7 +1395,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         return nil
     }
 
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { webView.reload() }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard webView === self.webView else { return }
+        webView.reload()
+    }
 }
 
 struct StatsDayItem: Identifiable {

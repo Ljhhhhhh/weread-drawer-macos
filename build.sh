@@ -8,7 +8,7 @@ echo "==> Building ${APP_NAME}..."
 mkdir -p "${OUTPUT_DIR}/Contents/MacOS"
 mkdir -p "${OUTPUT_DIR}/Contents/Resources"
 
-swiftc Sources/main.swift \
+swiftc -O Sources/main.swift \
     -o "${OUTPUT_DIR}/Contents/MacOS/${APP_NAME}" \
     -framework Cocoa \
     -framework WebKit \
@@ -16,5 +16,8 @@ swiftc Sources/main.swift \
     -framework SwiftUI
 
 cp Resources/Info.plist "${OUTPUT_DIR}/Contents/Info.plist"
+cp Resources/AppIcon.icns "${OUTPUT_DIR}/Contents/Resources/AppIcon.icns"
+cp Resources/MenuBar-template.pdf "${OUTPUT_DIR}/Contents/Resources/MenuBar-template.pdf"
+codesign --force --sign - "${OUTPUT_DIR}"
 
 echo "==> Build complete: ${OUTPUT_DIR}"
