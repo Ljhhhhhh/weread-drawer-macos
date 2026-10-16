@@ -447,15 +447,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
-            if let image = NSImage(systemSymbolName: "book.pages", accessibilityDescription: "WeRead Drawer")?.withSymbolConfiguration(config) {
+            if let url = Bundle.main.url(forResource: "MenuBar-template", withExtension: "pdf"),
+               let image = NSImage(contentsOf: url) {
+                image.size = NSSize(width: 18, height: 18)
                 image.isTemplate = true
+                image.accessibilityDescription = "WeRead Drawer"
                 button.image = image
-            } else if let fallback = NSImage(systemSymbolName: "book", accessibilityDescription: "WeRead Drawer")?.withSymbolConfiguration(config) {
-                fallback.isTemplate = true
-                button.image = fallback
             } else {
-                button.title = "📖"
+                button.title = "W"
             }
             button.action = #selector(toggleDrawer)
             button.target = self
